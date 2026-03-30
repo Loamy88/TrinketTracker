@@ -54,7 +54,6 @@ fun NotCollectedScreen(
     var pendingTeam by remember { mutableStateOf<Team?>(null) }
     var photoUri by remember { mutableStateOf<Uri?>(null) }
     var photoFile by remember { mutableStateOf<File?>(null) }
-    var showCameraConfirm by remember { mutableStateOf(false) }
 
     // Camera launcher
     val cameraLauncher = rememberLauncherForActivityResult(
@@ -89,17 +88,15 @@ fun NotCollectedScreen(
         }
     }
 
-    fun launchCamera(team: Team) {
-        pendingTeam = team
-        when {
-            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
-                    == PackageManager.PERMISSION_GRANTED -> {
-                val (uri, file) = createPhotoFile(context, team.teamNumber)
-                photoUri = uri
-                photoFile = file
-                if (uri != null) cameraLauncher.launch(uri)
+    // File picker launcher for XLS upload
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            val inputStream = context.contentResolver.openInputStream(uri)
+            if (inputStream != null) {
+                viewModel.loadTeamsFromFile(inputStream)
             }
-            else -> permissionLauncher.launch(Manifest.permission.CAMERA)
         }
     }
 
@@ -113,6 +110,20 @@ fun NotCollectedScreen(
         uiState.successMessage?.let {
             snackbarHostState.showSnackbar(it, duration = SnackbarDuration.Short)
             viewModel.clearMessage()
+        }
+    }
+
+    fun launchCamera(team: Team) {
+        pendingTeam = team
+        when {
+            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
+                    == PackageManager.PERMISSION_GRANTED -> {
+                val (uri, file) = createPhotoFile(context, team.teamNumber)
+                photoUri = uri
+                photoFile = file
+                if (uri != null) cameraLauncher.launch(uri)
+            }
+            else -> permissionLauncher.launch(Manifest.permission.CAMERA)
         }
     }
 
@@ -166,9 +177,16 @@ fun NotCollectedScreen(
 
                 Spacer(modifier = Modifier.width(10.dp))
 
-                // Refresh button
+                // Upload/Refresh button - now opens file picker
                 FilledTonalButton(
-                    onClick = { viewModel.refreshTeams() },
+                    onClick = {
+                        filePickerLauncher.launch(
+                            arrayOf(
+                                "application/vnd.ms-excel",
+                                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                            )
+                        )
+                    },
                     enabled = !uiState.isLoading,
                     shape = RoundedCornerShape(12.dp),
                     colors = ButtonDefaults.filledTonalButtonColors(
@@ -184,7 +202,7 @@ fun NotCollectedScreen(
                             strokeWidth = 2.dp
                         )
                     } else {
-                        Icon(Icons.Default.Refresh, contentDescription = "Refresh", modifier = Modifier.size(20.dp))
+                        Icon(Icons.Default.FileOpen, contentDescription = "Upload XLS", modifier = Modifier.size(20.dp))
                     }
                 }
             }
@@ -221,9 +239,9 @@ fun NotCollectedScreen(
 
                 teams.isEmpty() && progress.total == 0 -> {
                     EmptyState(
-                        icon = Icons.Default.Groups,
+                        icon = Icons.Default.UploadFile,
                         title = "No teams loaded",
-                        subtitle = "Tap the refresh button to download teams from RobotEvents"
+                        subtitle = "Tap the upload button to load teams from a .xls file"
                     )
                 }
 
@@ -270,130 +288,85 @@ fun TeamListItem(team: Team, onClick: () -> Unit) {
             .fillMaxWidth()
             .clickable(onClick = onClick),
         shape = RoundedCornerShape(14.dp),
-        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        )
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
         ) {
-            // Team number badge
-            Box(
-                modifier = Modifier
-                    .size(52.dp)
-                    .clip(RoundedCornerShape(10.dp))
-                    .background(VexRed),
-                contentAlignment = Alignment.Center
-            ) {
+            Column(modifier = Modifier.weight(1f)) {
                 Text(
                     text = team.teamNumber,
-                    color = Color.White,
-                    fontSize = if (team.teamNumber.length > 6) 9.sp else 11.sp,
                     fontWeight = FontWeight.Bold,
+                    fontSize = 16.sp
+                )
+                Text(
+                    text = team.teamName,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
             }
-
-            Spacer(modifier = Modifier.width(14.dp))
-
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = team.teamName.ifBlank { "Unknown Team" },
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    color = MaterialTheme.colorScheme.onSurface
-                )
-                Text(
-                    text = "Team ${team.teamNumber}",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            // Camera icon
-            Box(
-                modifier = Modifier
-                    .size(40.dp)
-                    .clip(CircleShape)
-                    .background(VexRed.copy(alpha = 0.1f)),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Outlined.CameraAlt,
-                    contentDescription = "Capture Trinket",
-                    tint = VexRed,
-                    modifier = Modifier.size(22.dp)
-                )
-            }
+            Icon(
+                imageVector = Icons.Default.PhotoCamera,
+                contentDescription = "Take photo",
+                modifier = Modifier.size(24.dp),
+                tint = VexRed
+            )
         }
     }
+}
+
+private fun createPhotoFile(context: Context, teamNumber: String): Pair<Uri?, File?> {
+    val storageDir = File(context.getExternalFilesDir(Environment.DIRECTORY_PICTURES), "trinkets")
+    if (!storageDir.exists()) storageDir.mkdirs()
+
+    val photoFile = File.createTempFile(
+        "trinket_${teamNumber}_",
+        ".jpg",
+        storageDir
+    )
+
+    val photoUri = FileProvider.getUriForFile(
+        context,
+        "${context.packageName}.fileprovider",
+        photoFile
+    )
+
+    return Pair(photoUri, photoFile)
 }
 
 @Composable
-fun EmptyState(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    title: String,
-    subtitle: String
-) {
-    Box(
+fun EmptyState(icon: androidx.compose.material.icons.Icons, title: String, subtitle: String) {
+    Column(
         modifier = Modifier
             .fillMaxSize()
             .padding(32.dp),
-        contentAlignment = Alignment.Center
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center
     ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.4f),
-                modifier = Modifier.size(72.dp)
-            )
-            Spacer(Modifier.height(16.dp))
-            Text(
-                text = title,
-                style = MaterialTheme.typography.titleLarge,
-                color = MaterialTheme.colorScheme.onSurface,
-                fontWeight = FontWeight.SemiBold
-            )
-            Spacer(Modifier.height(8.dp))
-            Text(
-                text = subtitle,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = androidx.compose.ui.text.style.TextAlign.Center
-            )
-        }
-    }
-}
-
-fun createPhotoFile(context: Context, teamNumber: String): Pair<Uri?, File?> {
-    return try {
-        val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val safeTeamNumber = teamNumber.replace(Regex("[^A-Za-z0-9]"), "_")
-        val fileName = "TRINKET_${safeTeamNumber}_$timeStamp.jpg"
-
-        // Save to the app's external Pictures directory so it's accessible
-        val picturesDir = File(
-            context.getExternalFilesDir(Environment.DIRECTORY_PICTURES),
-            "TrinketTracker"
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            modifier = Modifier.size(64.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f)
         )
-        if (!picturesDir.exists()) picturesDir.mkdirs()
-
-        val photoFile = File(picturesDir, fileName)
-        val uri = FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.fileprovider",
-            photoFile
+        Spacer(Modifier.height(16.dp))
+        Text(
+            text = title,
+            style = MaterialTheme.typography.headlineSmall,
+            fontWeight = FontWeight.Bold
         )
-        Pair(uri, photoFile)
-    } catch (e: Exception) {
-        Pair(null, null)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = subtitle,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+        )
     }
 }
