@@ -1,66 +1,132 @@
 package com.vexiq.trinkettracker.data
 
+import android.app.DownloadManager
+import android.content.Context
+import android.net.Uri
+import android.os.Environment
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
 import org.apache.poi.hssf.usermodel.HSSFWorkbook
+import java.io.File
 import java.io.InputStream
-import java.util.concurrent.TimeUnit
 
-class TeamRepository(private val teamDao: TeamDao) {
+class TeamRepository(
+    private val teamDao: TeamDao,
+    private val context: Context
+) {
 
-    private val client = OkHttpClient.Builder()
-        .connectTimeout(30, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
-        .writeTimeout(60, TimeUnit.SECONDS)
-        .build()
-
-    private val teamsReportUrl =
-        "https://www.robotevents.com/eventEntities/64028/teamsReport"
+    companion object {
+        private const val TAG = "TeamRepository"
+        private const val TEAMS_URL =
+            "https://www.robotevents.com/eventEntities/64028/teamsReport"
+        // Full Chrome-on-Android UA so the server treats us identically to the browser
+        private const val CHROME_UA =
+            "Mozilla/5.0 (Linux; Android 14; Pixel 8) " +
+                    "AppleWebKit/537.36 (KHTML, like Gecko) " +
+                    "Chrome/124.0.0.0 Mobile Safari/537.36"
+    }
 
     fun getNotCollectedTeams(): Flow<List<Team>> = teamDao.getNotCollectedTeams()
-
     fun getCollectedTeams(): Flow<List<Team>> = teamDao.getCollectedTeams()
-
     fun getAllTeams(): Flow<List<Team>> = teamDao.getAllTeams()
-
-    suspend fun getTotalCount(): Int = teamDao.getTotalCount()
-
-    suspend fun getCollectedCount(): Int = teamDao.getCollectedCount()
 
     suspend fun markTeamCollected(teamNumber: String, photoPath: String) {
         teamDao.markCollected(teamNumber, photoPath, System.currentTimeMillis())
     }
 
+    suspend fun retakeTeamPhoto(teamNumber: String, photoPath: String) {
+        teamDao.markCollected(teamNumber, photoPath, System.currentTimeMillis())
+    }
+
+    suspend fun removeTeams(teamNumbers: List<String>) {
+        teamDao.unmarkCollectedBatch(teamNumbers)
+    }
+
     /**
-     * Downloads the XLS team report and updates the local database.
-     * Already-collected teams remain collected after refresh.
+     * Downloads the XLS via Android's DownloadManager — this uses the system
+     * network stack (same cookies, certificates and proxy settings as Chrome),
+     * which prevents the 403 errors that a plain HTTP client can hit on some
+     * corporate / school WiFi networks.
      */
     suspend fun refreshTeams(): Result<Int> = withContext(Dispatchers.IO) {
         try {
-            val request = Request.Builder()
-                .url(teamsReportUrl)
-                .header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36 OPR/128.0.0.0")
-                .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
-                .header("Accept-Language", "en-US,en;q=0.9")
-                .build()
+            val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
 
-            val response = client.newCall(request).execute()
+            // Put the file in the app's cache so we can read it back
+            val destFile = File(context.cacheDir, "teams_report.xls")
+            if (destFile.exists()) destFile.delete()
 
-            if (!response.isSuccessful) {
+            val request = DownloadManager.Request(Uri.parse(TEAMS_URL))
+                .setTitle("VEX IQ Team List")
+                .setDescription("Downloading team report…")
+                .addRequestHeader("User-Agent", CHROME_UA)
+                .addRequestHeader(
+                    "Accept",
+                    "text/html,application/xhtml+xml,application/xml;" +
+                            "q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8"
+                )
+                .addRequestHeader("Accept-Language", "en-US,en;q=0.9")
+                .addRequestHeader("Cache-Control", "no-cache")
+                .addRequestHeader("Pragma", "no-cache")
+                .addRequestHeader("Upgrade-Insecure-Requests", "1")
+                .setDestinationUri(Uri.fromFile(destFile))
+                .setNotificationVisibility(
+                    DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
+                )
+
+            val downloadId = dm.enqueue(request)
+            Log.d(TAG, "DownloadManager enqueued id=$downloadId")
+
+            // Poll until complete, failed, or timed out (60 s)
+            val deadline = System.currentTimeMillis() + 60_000L
+            var status = DownloadManager.STATUS_PENDING
+            var reason = 0
+
+            while (System.currentTimeMillis() < deadline) {
+                val cursor = dm.query(DownloadManager.Query().setFilterById(downloadId))
+                if (cursor != null && cursor.moveToFirst()) {
+                    status = cursor.getInt(
+                        cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_STATUS)
+                    )
+                    reason = cursor.getInt(
+                        cursor.getColumnIndexOrThrow(DownloadManager.COLUMN_REASON)
+                    )
+                    cursor.close()
+                } else {
+                    cursor?.close()
+                }
+
+                when (status) {
+                    DownloadManager.STATUS_SUCCESSFUL -> break
+                    DownloadManager.STATUS_FAILED -> {
+                        dm.remove(downloadId)
+                        return@withContext Result.failure(
+                            Exception("Download failed (reason=$reason). Check your internet connection and try again.")
+                        )
+                    }
+                }
+                delay(400)
+            }
+
+            if (status != DownloadManager.STATUS_SUCCESSFUL) {
+                dm.remove(downloadId)
+                return@withContext Result.failure(Exception("Download timed out after 60 s"))
+            }
+
+            if (!destFile.exists() || destFile.length() == 0L) {
                 return@withContext Result.failure(
-                    Exception("Download failed: HTTP ${response.code}")
+                    Exception("Downloaded file is empty or missing")
                 )
             }
 
-            val body = response.body ?: return@withContext Result.failure(
-                Exception("Empty response body")
-            )
+            Log.d(TAG, "File downloaded: ${destFile.length()} bytes")
 
-            val teams = parseXls(body.byteStream())
+            // Parse and sync
+            val teams = parseXls(destFile.inputStream())
+            destFile.delete()
 
             if (teams.isEmpty()) {
                 return@withContext Result.failure(
@@ -68,78 +134,61 @@ class TeamRepository(private val teamDao: TeamDao) {
                 )
             }
 
-            // Get already-collected team numbers to preserve their status
             val collectedNumbers = teamDao.getCollectedTeamNumbers().toSet()
 
-            // Insert new teams (IGNORE strategy means existing rows aren't overwritten)
-            val teamEntities = teams.map { (number, name) ->
-                Team(
-                    teamNumber = number,
-                    teamName = name,
-                    isCollected = collectedNumbers.contains(number)
-                )
-            }
-
-            // For teams that exist but have a different name, update the name
-            teamEntities.forEach { team ->
-                val existing = teamDao.getTeamByNumber(team.teamNumber)
+            teams.forEach { (number, name) ->
+                val existing = teamDao.getTeamByNumber(number)
                 if (existing == null) {
-                    teamDao.insertTeam(team)
-                } else if (existing.teamName != team.teamName) {
-                    // Update name but preserve collection status
-                    teamDao.updateTeam(existing.copy(teamName = team.teamName))
+                    teamDao.insertTeam(
+                        Team(
+                            teamNumber = number,
+                            teamName = name,
+                            isCollected = collectedNumbers.contains(number)
+                        )
+                    )
+                } else if (existing.teamName != name) {
+                    teamDao.updateTeam(existing.copy(teamName = name))
                 }
-                // If team already exists with correct name, do nothing
             }
 
+            Log.d(TAG, "Synced ${teams.size} teams")
             Result.success(teams.size)
+
         } catch (e: Exception) {
-            Log.e("TeamRepository", "Error refreshing teams", e)
+            Log.e(TAG, "refreshTeams failed", e)
             Result.failure(e)
         }
     }
 
     /**
-     * Parses an XLS file input stream and returns a list of (teamNumber, teamName) pairs.
-     * Skips the header row (row 0).
+     * Parses a legacy .xls file (HSSF format).
+     * Row 0 = header ("Team", "Team Name", …); data starts at row 1.
      */
     private fun parseXls(inputStream: InputStream): List<Pair<String, String>> {
         val teams = mutableListOf<Pair<String, String>>()
-
         return try {
             val workbook = HSSFWorkbook(inputStream)
             val sheet = workbook.getSheetAt(0)
+            Log.d(TAG, "Sheet rows: ${sheet.lastRowNum + 1}")
 
-            val lastRow = sheet.lastRowNum
-            Log.d("XLS", "Total rows in sheet: ${lastRow + 1}")
-
-            // Row 0 is the header; start from row 1
-            for (rowIndex in 1..lastRow) {
+            for (rowIndex in 1..sheet.lastRowNum) {
                 val row = sheet.getRow(rowIndex) ?: continue
+                val rawNumber = row.getCell(0)?.toString()?.trim() ?: ""
+                val rawName = row.getCell(1)?.toString()?.trim() ?: ""
+                if (rawNumber.isEmpty()) continue
 
-                val teamNumberCell = row.getCell(0)
-                val teamNameCell = row.getCell(1)
+                // POI may stringify numeric cells as "12345.0" — strip trailing ".0"
+                val teamNumber = if (rawNumber.matches(Regex("\\d+\\.0")))
+                    rawNumber.dropLast(2) else rawNumber
 
-                val teamNumber = teamNumberCell?.toString()?.trim() ?: ""
-                val teamName = teamNameCell?.toString()?.trim() ?: ""
-
-                if (teamNumber.isNotEmpty()) {
-                    // POI sometimes reads numbers as floats (e.g., "12345.0")
-                    // Clean up numeric team numbers
-                    val cleanNumber = if (teamNumber.endsWith(".0")) {
-                        teamNumber.dropLast(2)
-                    } else {
-                        teamNumber
-                    }
-                    teams.add(Pair(cleanNumber, teamName))
-                }
+                teams.add(teamNumber to rawName)
             }
 
             workbook.close()
-            Log.d("XLS", "Parsed ${teams.size} teams")
+            Log.d(TAG, "Parsed ${teams.size} teams")
             teams
         } catch (e: Exception) {
-            Log.e("TeamRepository", "XLS parsing failed", e)
+            Log.e(TAG, "XLS parse error", e)
             teams
         }
     }

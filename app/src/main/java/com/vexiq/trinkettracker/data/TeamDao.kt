@@ -36,8 +36,13 @@ interface TeamDao {
     @Query("UPDATE teams SET isCollected = 1, photoPath = :photoPath, collectedAt = :timestamp WHERE teamNumber = :teamNumber")
     suspend fun markCollected(teamNumber: String, photoPath: String, timestamp: Long)
 
-    @Query("DELETE FROM teams WHERE teamNumber NOT IN (:keepNumbers)")
-    suspend fun deleteTeamsNotIn(keepNumbers: List<String>)
+    /** Reset a team back to not-collected (e.g. remove from collected list) */
+    @Query("UPDATE teams SET isCollected = 0, photoPath = NULL, collectedAt = NULL WHERE teamNumber = :teamNumber")
+    suspend fun unmarkCollected(teamNumber: String)
+
+    /** Batch reset – used for the "Remove" action in selection mode */
+    @Query("UPDATE teams SET isCollected = 0, photoPath = NULL, collectedAt = NULL WHERE teamNumber IN (:teamNumbers)")
+    suspend fun unmarkCollectedBatch(teamNumbers: List<String>)
 
     @Query("SELECT * FROM teams WHERE teamNumber = :teamNumber")
     suspend fun getTeamByNumber(teamNumber: String): Team?

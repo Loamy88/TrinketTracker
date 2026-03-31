@@ -12,14 +12,6 @@ workflows:
       java: 17
 
     scripts:
-      - name: Generate Gradle wrapper if missing
-        script: |
-          cd $CM_BUILD_DIR
-          if [ ! -f gradlew ]; then
-            gradle wrapper --gradle-version=8.4
-          fi
-          chmod +x gradlew
-
       - name: Set Android SDK location
         script: |
           echo "sdk.dir=$ANDROID_SDK_ROOT" > "$CM_BUILD_DIR/local.properties"
@@ -27,6 +19,7 @@ workflows:
       - name: Build Android release APK
         script: |
           cd $CM_BUILD_DIR
+          chmod +x gradlew
           ./gradlew assembleRelease \
             -Pandroid.injected.signing.store.file=$CM_KEYSTORE_PATH \
             -Pandroid.injected.signing.store.password=$CM_KEYSTORE_PASSWORD \
@@ -52,14 +45,6 @@ workflows:
       java: 17
 
     scripts:
-      - name: Generate Gradle wrapper if missing
-        script: |
-          cd $CM_BUILD_DIR
-          if [ ! -f gradlew ]; then
-            gradle wrapper --gradle-version=8.4
-          fi
-          chmod +x gradlew
-
       - name: Set Android SDK location
         script: |
           echo "sdk.dir=$ANDROID_SDK_ROOT" > "$CM_BUILD_DIR/local.properties"
@@ -67,6 +52,7 @@ workflows:
       - name: Build Android debug APK
         script: |
           cd $CM_BUILD_DIR
+          chmod +x gradlew
           ./gradlew assembleDebug
 
     artifacts:

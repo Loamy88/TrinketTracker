@@ -28,26 +28,18 @@ class TeamViewModel(application: Application) : AndroidViewModel(application) {
 
     private val repository: TeamRepository
 
-    // Search queries
     private val _notCollectedSearch = MutableStateFlow("")
     val notCollectedSearch: StateFlow<String> = _notCollectedSearch.asStateFlow()
 
     private val _collectedSearch = MutableStateFlow("")
     val collectedSearch: StateFlow<String> = _collectedSearch.asStateFlow()
 
-    // UI state (loading/error)
     private val _uiState = MutableStateFlow(UiState())
     val uiState: StateFlow<UiState> = _uiState.asStateFlow()
 
-    // Progress
     private val _progress = MutableStateFlow(ProgressState())
     val progress: StateFlow<ProgressState> = _progress.asStateFlow()
 
-    // Raw team flows from DB
-    private val notCollectedRaw: StateFlow<List<Team>>
-    private val collectedRaw: StateFlow<List<Team>>
-
-    // Filtered by search
     @OptIn(ExperimentalCoroutinesApi::class)
     val notCollectedTeams: StateFlow<List<Team>>
 
@@ -56,16 +48,11 @@ class TeamViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         val dao = TeamDatabase.getDatabase(application).teamDao()
-        repository = TeamRepository(dao)
-
-        notCollectedRaw = repository.getNotCollectedTeams()
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
-
-        collectedRaw = repository.getCollectedTeams()
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+        // Pass application context so DownloadManager works
+        repository = TeamRepository(dao, application.applicationContext)
 
         @OptIn(ExperimentalCoroutinesApi::class)
-        notCollectedTeams = notCollectedSearch.flatMapLatest { query ->
+        notCollectedTeams = _notCollectedSearch.flatMapLatest { query ->
             repository.getNotCollectedTeams().map { teams ->
                 if (query.isBlank()) teams
                 else teams.filter {
@@ -76,7 +63,7 @@ class TeamViewModel(application: Application) : AndroidViewModel(application) {
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
         @OptIn(ExperimentalCoroutinesApi::class)
-        collectedTeams = collectedSearch.flatMapLatest { query ->
+        collectedTeams = _collectedSearch.flatMapLatest { query ->
             repository.getCollectedTeams().map { teams ->
                 if (query.isBlank()) teams
                 else teams.filter {
@@ -86,43 +73,41 @@ class TeamViewModel(application: Application) : AndroidViewModel(application) {
             }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
-        // Update progress whenever teams change
         viewModelScope.launch {
             repository.getAllTeams().collect { all ->
-                val total = all.size
-                val collected = all.count { it.isCollected }
-                _progress.value = ProgressState(collected = collected, total = total)
+                _progress.value = ProgressState(
+                    collected = all.count { it.isCollected },
+                    total = all.size
+                )
             }
         }
     }
 
-    fun setNotCollectedSearch(query: String) {
-        _notCollectedSearch.value = query
-    }
-
-    fun setCollectedSearch(query: String) {
-        _collectedSearch.value = query
-    }
+    fun setNotCollectedSearch(query: String) { _notCollectedSearch.value = query }
+    fun setCollectedSearch(query: String) { _collectedSearch.value = query }
 
     fun refreshTeams() {
         viewModelScope.launch {
             _uiState.value = UiState(isLoading = true)
-            val result = repository.refreshTeams()
-            result.fold(
-                onSuccess = { count ->
-                    _uiState.value = UiState(successMessage = "Loaded $count teams")
-                },
-                onFailure = { e ->
-                    _uiState.value = UiState(error = e.message ?: "Unknown error")
-                }
+            repository.refreshTeams().fold(
+                onSuccess = { count -> _uiState.value = UiState(successMessage = "Loaded $count teams") },
+                onFailure = { e -> _uiState.value = UiState(error = e.message ?: "Unknown error") }
             )
         }
     }
 
     fun collectTeam(teamNumber: String, photoPath: String) {
-        viewModelScope.launch {
-            repository.markTeamCollected(teamNumber, photoPath)
-        }
+        viewModelScope.launch { repository.markTeamCollected(teamNumber, photoPath) }
+    }
+
+    /** Replace the stored photo for an already-collected team (retake). */
+    fun retakeTeamPhoto(teamNumber: String, photoPath: String) {
+        viewModelScope.launch { repository.retakeTeamPhoto(teamNumber, photoPath) }
+    }
+
+    /** Move the given team numbers back to "not collected". */
+    fun removeTeams(teamNumbers: List<String>) {
+        viewModelScope.launch { repository.removeTeams(teamNumbers) }
     }
 
     fun clearMessage() {
