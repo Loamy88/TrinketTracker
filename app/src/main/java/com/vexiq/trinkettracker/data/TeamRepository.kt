@@ -55,8 +55,10 @@ class TeamRepository(
         try {
             val dm = context.getSystemService(Context.DOWNLOAD_SERVICE) as DownloadManager
 
-            // Put the file in the app's cache so we can read it back
-            val destFile = File(context.cacheDir, "teams_report.xls")
+            // DownloadManager requires external storage — internal cache paths are rejected
+            val destDir = context.getExternalFilesDir(null)
+                ?: return@withContext Result.failure(Exception("External storage unavailable"))
+            val destFile = File(destDir, "teams_report.xls")
             if (destFile.exists()) destFile.delete()
 
             val request = DownloadManager.Request(Uri.parse(TEAMS_URL))
