@@ -33,7 +33,7 @@ workflows:
     publishing:
       email:
         recipients:
-          - euan.m.obrien@gmail.com
+          - your@email.com
         notify:
           success: true
           failure: true

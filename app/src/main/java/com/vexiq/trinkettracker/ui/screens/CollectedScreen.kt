@@ -9,7 +9,7 @@ import android.os.Environment
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.*
-import androidx.compose.animation.core.animateColorAsState
+import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
@@ -504,11 +504,7 @@ fun CollectedTeamItem(
                 }
 
                 // Selection overlay
-                AnimatedVisibility(
-                    visible = selectionMode,
-                    enter = fadeIn(tween(150)),
-                    exit = fadeOut(tween(150))
-                ) {
+                if (selectionMode) {
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
