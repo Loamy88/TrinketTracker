@@ -1,6 +1,8 @@
 package com.vexiq.trinkettracker.ui.screens
 
 import android.Manifest
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.Context
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -32,6 +34,7 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import com.vexiq.trinkettracker.data.Team
+import com.vexiq.trinkettracker.data.TeamRepository
 import com.vexiq.trinkettracker.ui.theme.*
 import com.vexiq.trinkettracker.viewmodel.ProgressState
 import com.vexiq.trinkettracker.viewmodel.TeamViewModel
@@ -50,15 +53,12 @@ fun NotCollectedScreen(
     val searchQuery by viewModel.notCollectedSearch.collectAsState()
     val uiState by viewModel.uiState.collectAsState()
 
-    // Track which team is pending camera capture
     var pendingTeam by remember { mutableStateOf<Team?>(null) }
     var photoUri by remember { mutableStateOf<Uri?>(null) }
     var photoFile by remember { mutableStateOf<File?>(null) }
-    var showCameraConfirm by remember { mutableStateOf(false) }
 
-    // Camera launcher
     val cameraLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.TakePicture()
+        ActivityResultContracts.TakePicture()
     ) { success ->
         if (success && pendingTeam != null) {
             val file = photoFile
@@ -67,23 +67,17 @@ fun NotCollectedScreen(
                 viewModel.collectTeam(team.teamNumber, file.absolutePath)
             }
         }
-        pendingTeam = null
-        photoUri = null
-        photoFile = null
+        pendingTeam = null; photoUri = null; photoFile = null
     }
 
-    // Permission launcher
     val permissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
+        ActivityResultContracts.RequestPermission()
     ) { granted ->
         if (granted) {
-            val team = pendingTeam
-            if (team != null) {
-                val (uri, file) = createPhotoFile(context, team.teamNumber)
-                photoUri = uri
-                photoFile = file
-                if (uri != null) cameraLauncher.launch(uri)
-            }
+            val team = pendingTeam ?: return@rememberLauncherForActivityResult
+            val (uri, file) = createPhotoFile(context, team.teamNumber)
+            photoUri = uri; photoFile = file
+            if (uri != null) cameraLauncher.launch(uri)
         } else {
             pendingTeam = null
         }
@@ -91,19 +85,23 @@ fun NotCollectedScreen(
 
     fun launchCamera(team: Team) {
         pendingTeam = team
-        when {
-            ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
-                    == PackageManager.PERMISSION_GRANTED -> {
-                val (uri, file) = createPhotoFile(context, team.teamNumber)
-                photoUri = uri
-                photoFile = file
-                if (uri != null) cameraLauncher.launch(uri)
-            }
-            else -> permissionLauncher.launch(Manifest.permission.CAMERA)
+        if (ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA)
+            == PackageManager.PERMISSION_GRANTED
+        ) {
+            val (uri, file) = createPhotoFile(context, team.teamNumber)
+            photoUri = uri; photoFile = file
+            if (uri != null) cameraLauncher.launch(uri)
+        } else {
+            permissionLauncher.launch(Manifest.permission.CAMERA)
         }
     }
 
-    // Snackbar
+    val filePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) viewModel.importFromFile(uri)
+    }
+
     val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(uiState.error, uiState.successMessage) {
         uiState.error?.let {
@@ -125,10 +123,8 @@ fun NotCollectedScreen(
                 .fillMaxSize()
                 .padding(paddingValues)
         ) {
-            // Progress header
             ProgressHeader(progress = progress)
 
-            // Search bar + refresh row
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -141,11 +137,8 @@ fun NotCollectedScreen(
                     modifier = Modifier.weight(1f),
                     placeholder = { Text("Search teams…", style = MaterialTheme.typography.bodyMedium) },
                     leadingIcon = {
-                        Icon(
-                            imageVector = Icons.Default.Search,
-                            contentDescription = "Search",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Icon(Icons.Default.Search, contentDescription = "Search",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant)
                     },
                     trailingIcon = {
                         if (searchQuery.isNotEmpty()) {
@@ -164,18 +157,17 @@ fun NotCollectedScreen(
                     )
                 )
 
-                Spacer(modifier = Modifier.width(10.dp))
+                Spacer(modifier = Modifier.width(8.dp))
 
-                // Refresh button
-                FilledTonalButton(
+                FilledTonalIconButton(
                     onClick = { viewModel.refreshTeams() },
-                    enabled = !uiState.isLoading,
-                    shape = RoundedCornerShape(12.dp),
-                    colors = ButtonDefaults.filledTonalButtonColors(
+                    enabled = !uiState.isLoading && !uiState.isImporting,
+                    colors = IconButtonDefaults.filledTonalIconButtonColors(
                         containerColor = VexRed,
-                        contentColor = Color.White
-                    ),
-                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 12.dp)
+                        contentColor = Color.White,
+                        disabledContainerColor = VexRed.copy(alpha = 0.4f),
+                        disabledContentColor = Color.White.copy(alpha = 0.6f)
+                    )
                 ) {
                     if (uiState.isLoading) {
                         CircularProgressIndicator(
@@ -184,37 +176,69 @@ fun NotCollectedScreen(
                             strokeWidth = 2.dp
                         )
                     } else {
-                        Icon(Icons.Default.Refresh, contentDescription = "Refresh", modifier = Modifier.size(20.dp))
+                        Icon(Icons.Default.Refresh, contentDescription = "Auto-download teams")
+                    }
+                }
+
+                Spacer(modifier = Modifier.width(6.dp))
+
+                FilledTonalIconButton(
+                    onClick = { filePicker.launch("*/*") },
+                    enabled = !uiState.isLoading && !uiState.isImporting,
+                    colors = IconButtonDefaults.filledTonalIconButtonColors(
+                        containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                        contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                        disabledContainerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f),
+                        disabledContentColor = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.5f)
+                    )
+                ) {
+                    if (uiState.isImporting) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp
+                        )
+                    } else {
+                        Icon(Icons.Default.FileOpen, contentDescription = "Import XLS file")
                     }
                 }
             }
 
-            // Team count info bar
+            AnimatedVisibility(
+                visible = uiState.show403Hint,
+                enter = expandVertically() + fadeIn(),
+                exit = shrinkVertically() + fadeOut()
+            ) {
+                ManualImportCard(
+                    url = TeamRepository.TEAMS_URL,
+                    context = context,
+                    onImportClick = { filePicker.launch("*/*") },
+                    onDismiss = { viewModel.dismiss403Hint() }
+                )
+            }
+
             AnimatedVisibility(visible = teams.isNotEmpty() || searchQuery.isNotEmpty()) {
-                Row(
+                Text(
+                    text = if (searchQuery.isBlank()) "${teams.size} teams remaining"
+                    else "${teams.size} results for \"$searchQuery\"",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier
                         .fillMaxWidth()
                         .padding(horizontal = 16.dp)
-                        .padding(bottom = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        text = if (searchQuery.isBlank()) "${teams.size} teams remaining"
-                        else "${teams.size} results for \"$searchQuery\"",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
+                        .padding(bottom = 4.dp)
+                )
             }
 
-            // Team list
             when {
-                uiState.isLoading && teams.isEmpty() -> {
+                (uiState.isLoading || uiState.isImporting) && teams.isEmpty() -> {
                     Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                             CircularProgressIndicator(color = VexRed)
                             Spacer(Modifier.height(12.dp))
-                            Text("Loading teams…", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(
+                                if (uiState.isImporting) "Importing file…" else "Downloading teams…",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
                         }
                     }
                 }
@@ -223,7 +247,7 @@ fun NotCollectedScreen(
                     EmptyState(
                         icon = Icons.Default.Groups,
                         title = "No teams loaded",
-                        subtitle = "Tap the refresh button to download teams from RobotEvents"
+                        subtitle = "Tap  ↻  to auto-download, or  📂  to import an XLS file"
                     )
                 }
 
@@ -250,14 +274,158 @@ fun NotCollectedScreen(
                         verticalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         items(teams, key = { it.teamNumber }) { team ->
-                            TeamListItem(
-                                team = team,
-                                onClick = { launchCamera(team) }
-                            )
+                            TeamListItem(team = team, onClick = { launchCamera(team) })
                         }
                         item { Spacer(Modifier.height(80.dp)) }
                     }
                 }
+            }
+        }
+    }
+}
+
+@Composable
+fun ManualImportCard(
+    url: String,
+    context: Context,
+    onImportClick: () -> Unit,
+    onDismiss: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 6.dp),
+        shape = RoundedCornerShape(14.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.errorContainer
+        ),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Column(modifier = Modifier.padding(14.dp)) {
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Default.WifiOff,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        "Auto-download blocked (403)",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onErrorContainer
+                    )
+                }
+                IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = "Dismiss",
+                        tint = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            Text(
+                "This WiFi blocks the download. Do it manually in 3 steps:",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onErrorContainer
+            )
+
+            Spacer(Modifier.height(10.dp))
+
+            listOf(
+                "1" to "Open the link below in Chrome and let it download",
+                "2" to "Come back to Trinket Tracker",
+                "3" to "Tap \"Import File\" and select the downloaded .xls"
+            ).forEach { (num, text) ->
+                Row(
+                    modifier = Modifier.padding(vertical = 3.dp),
+                    verticalAlignment = Alignment.Top
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(20.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.15f)),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            num,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onErrorContainer
+                        )
+                    }
+                    Spacer(Modifier.width(8.dp))
+                    Text(
+                        text,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            Surface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable {
+                        val clipboard = context.getSystemService(Context.CLIPBOARD_SERVICE)
+                                as ClipboardManager
+                        clipboard.setPrimaryClip(ClipData.newPlainText("Download URL", url))
+                    },
+                shape = RoundedCornerShape(8.dp),
+                color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.1f),
+                tonalElevation = 0.dp
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.ContentCopy,
+                        contentDescription = "Copy URL",
+                        tint = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.7f),
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(Modifier.width(6.dp))
+                    Text(
+                        url,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.85f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+
+            Spacer(Modifier.height(12.dp))
+
+            Button(
+                onClick = onImportClick,
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(10.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = MaterialTheme.colorScheme.onErrorContainer,
+                    contentColor = MaterialTheme.colorScheme.errorContainer
+                )
+            ) {
+                Icon(Icons.Default.FileOpen, contentDescription = null, modifier = Modifier.size(18.dp))
+                Spacer(Modifier.width(8.dp))
+                Text("Import File", fontWeight = FontWeight.SemiBold)
             }
         }
     }
@@ -271,9 +439,7 @@ fun TeamListItem(team: Team, onClick: () -> Unit) {
             .clickable(onClick = onClick),
         shape = RoundedCornerShape(14.dp),
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface
-        )
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
     ) {
         Row(
             modifier = Modifier
@@ -281,7 +447,6 @@ fun TeamListItem(team: Team, onClick: () -> Unit) {
                 .padding(14.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Team number badge
             Box(
                 modifier = Modifier
                     .size(52.dp)
@@ -317,7 +482,6 @@ fun TeamListItem(team: Team, onClick: () -> Unit) {
                 )
             }
 
-            // Camera icon
             Box(
                 modifier = Modifier
                     .size(40.dp)
@@ -378,19 +542,14 @@ fun createPhotoFile(context: Context, teamNumber: String): Pair<Uri?, File?> {
         val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
         val safeTeamNumber = teamNumber.replace(Regex("[^A-Za-z0-9]"), "_")
         val fileName = "TRINKET_${safeTeamNumber}_$timeStamp.jpg"
-
-        // Save to the app's external Pictures directory so it's accessible
         val picturesDir = File(
             context.getExternalFilesDir(Environment.DIRECTORY_PICTURES),
             "TrinketTracker"
         )
         if (!picturesDir.exists()) picturesDir.mkdirs()
-
         val photoFile = File(picturesDir, fileName)
         val uri = FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.fileprovider",
-            photoFile
+            context, "${context.packageName}.fileprovider", photoFile
         )
         Pair(uri, photoFile)
     } catch (e: Exception) {
