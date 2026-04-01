@@ -1,8 +1,10 @@
 package com.vexiq.trinkettracker.viewmodel
 
 import android.app.Application
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.vexiq.trinkettracker.data.RefreshResult
 import com.vexiq.trinkettracker.data.Team
 import com.vexiq.trinkettracker.data.TeamDatabase
 import com.vexiq.trinkettracker.data.TeamRepository
@@ -14,14 +16,16 @@ data class ProgressState(
     val collected: Int = 0,
     val total: Int = 0
 ) {
-    val percentage: Int get() = if (total == 0) 0 else (collected * 100 / total)
-    val fraction: Float get() = if (total == 0) 0f else collected.toFloat() / total.toFloat()
+    val percentage: Int  get() = if (total == 0) 0 else (collected * 100 / total)
+    val fraction: Float  get() = if (total == 0) 0f else collected.toFloat() / total.toFloat()
 }
 
 data class UiState(
     val isLoading: Boolean = false,
+    val isImporting: Boolean = false,
     val error: String? = null,
-    val successMessage: String? = null
+    val successMessage: String? = null,
+    val show403Hint: Boolean = false
 )
 
 class TeamViewModel(application: Application) : AndroidViewModel(application) {
@@ -48,7 +52,6 @@ class TeamViewModel(application: Application) : AndroidViewModel(application) {
 
     init {
         val dao = TeamDatabase.getDatabase(application).teamDao()
-        // Pass application context so DownloadManager works
         repository = TeamRepository(dao, application.applicationContext)
 
         @OptIn(ExperimentalCoroutinesApi::class)
@@ -84,14 +87,33 @@ class TeamViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun setNotCollectedSearch(query: String) { _notCollectedSearch.value = query }
-    fun setCollectedSearch(query: String) { _collectedSearch.value = query }
+    fun setCollectedSearch(query: String)    { _collectedSearch.value = query }
 
     fun refreshTeams() {
         viewModelScope.launch {
-            _uiState.value = UiState(isLoading = true)
-            repository.refreshTeams().fold(
-                onSuccess = { count -> _uiState.value = UiState(successMessage = "Loaded $count teams") },
-                onFailure = { e -> _uiState.value = UiState(error = e.message ?: "Unknown error") }
+            _uiState.value = UiState(isLoading = true, show403Hint = _uiState.value.show403Hint)
+            when (val result = repository.refreshTeams()) {
+                is RefreshResult.Success ->
+                    _uiState.value = UiState(successMessage = "Loaded ${result.count} teams")
+                is RefreshResult.Failure ->
+                    _uiState.value = UiState(error = result.message, show403Hint = result.is403)
+            }
+        }
+    }
+
+    fun importFromFile(uri: Uri) {
+        viewModelScope.launch {
+            _uiState.value = _uiState.value.copy(isImporting = true, error = null)
+            repository.importXlsFromUri(uri).fold(
+                onSuccess = { count ->
+                    _uiState.value = UiState(successMessage = "Imported $count teams successfully!")
+                },
+                onFailure = { e ->
+                    _uiState.value = _uiState.value.copy(
+                        isImporting = false,
+                        error = e.message ?: "Import failed"
+                    )
+                }
             )
         }
     }
@@ -100,14 +122,16 @@ class TeamViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch { repository.markTeamCollected(teamNumber, photoPath) }
     }
 
-    /** Replace the stored photo for an already-collected team (retake). */
     fun retakeTeamPhoto(teamNumber: String, photoPath: String) {
         viewModelScope.launch { repository.retakeTeamPhoto(teamNumber, photoPath) }
     }
 
-    /** Move the given team numbers back to "not collected". */
     fun removeTeams(teamNumbers: List<String>) {
         viewModelScope.launch { repository.removeTeams(teamNumbers) }
+    }
+
+    fun dismiss403Hint() {
+        _uiState.value = _uiState.value.copy(show403Hint = false)
     }
 
     fun clearMessage() {
